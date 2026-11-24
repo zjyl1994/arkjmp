@@ -24,7 +24,10 @@ import (
 const DefaultTestURL = "https://cp.cloudflare.com/generate_204"
 
 // APIError 连不上控制器、HTTP 报错、响应格式不对，都用这一个错误类型。
-type APIError struct{ Msg string }
+type APIError struct {
+	Msg    string
+	status int
+}
 
 func (e *APIError) Error() string { return e.Msg }
 
@@ -182,9 +185,9 @@ func (c *Client) call(parent context.Context, method, path string, query url.Val
 		message := strings.TrimSpace(fmt.Sprintf("HTTP %d %s", resp.StatusCode, text))
 		// 没配密码却收到 401：多半是控制器开了鉴权
 		if resp.StatusCode == http.StatusUnauthorized && c.Secret == "" {
-			return nil, &AuthRequiredError{&APIError{Msg: message}}
+			return nil, &AuthRequiredError{&APIError{Msg: message, status: resp.StatusCode}}
 		}
-		return nil, &APIError{Msg: message}
+		return nil, &APIError{Msg: message, status: resp.StatusCode}
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
 		return nil, nil
@@ -324,6 +327,9 @@ func (c *Client) Delay(ctx context.Context, name, provider, testURL string, time
 	raw, err := c.call(ctx, http.MethodGet, path, query, nil, time.Duration(timeoutMs)*time.Millisecond+5*time.Second)
 	if err != nil {
 		if _, timedOut := errors.AsType[*TimeoutError](err); timedOut {
+			return -1, nil
+		}
+		if apiErr, ok := errors.AsType[*APIError](err); ok && apiErr.status == http.StatusGatewayTimeout {
 			return -1, nil
 		}
 		return 0, err

@@ -10,7 +10,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -182,8 +181,8 @@ var commandFlags = map[string]map[string]flagKind{
 	"delay": {
 		"--timeout-ms": {takesValue: true, apply: func(o *Options, value string) error {
 			parsed, err := strconv.Atoi(value)
-			if err != nil || parsed <= 0 || int64(parsed) > (math.MaxInt64-int64(5*time.Second))/int64(time.Millisecond) {
-				return usageErr("--timeout-ms 需要有效的正整数，收到 %q", value)
+			if err != nil || parsed <= 0 || parsed > core.MaxDelayTimeoutMs {
+				return usageErr("--timeout-ms 需要 1–%d 之间的整数，收到 %q", core.MaxDelayTimeoutMs, value)
 			}
 			o.TimeoutMs = parsed
 			return nil
@@ -207,7 +206,7 @@ var commands = map[string]string{
 
 // Parse 解析参数（全局选项写在子命令前后都可以）。
 func Parse(argv []string) (*Options, error) {
-	o := &Options{Wait: 120, TimeoutMs: 5000}
+	o := &Options{Wait: 120, TimeoutMs: core.DefaultDelayTimeoutMs}
 	positionalOnly := false
 	var parseErr error
 

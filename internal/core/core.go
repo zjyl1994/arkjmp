@@ -18,13 +18,11 @@ import (
 	"github.com/zjyl1994/arkjmp/internal/client"
 )
 
-// 允许手动选择节点的分组类型。
-var selectableTypes = map[string]bool{
-	"Selector":    true,
-	"URLTest":     true,
-	"Fallback":    true,
-	"LoadBalance": true,
-}
+const (
+	DefaultDelayTimeoutMs = 3000
+	MaxDelayTimeoutMs     = 5000
+	selectorType          = "Selector"
+)
 
 // 这些"节点"根本没有延迟可测。
 var noDelayTypes = map[string]bool{
@@ -154,11 +152,11 @@ func (p *Proxy) HistoryDelay() (int, bool) {
 	if delay <= 0 {
 		return 0, false
 	}
-	return delay, true
+	return checkedDelay(delay, MaxDelayTimeoutMs), true
 }
 
-// IsGroup 表示这个节点其实是个可选分组。
-func (p *Proxy) IsGroup() bool { return p.HasAll && selectableTypes[p.Type] }
+// IsGroup 包含嵌套选择链中的手动和自动分组。
+func (p *Proxy) IsGroup() bool { return p.HasAll }
 
 // TestResult 是整组测速的结果。
 type TestResult struct {
@@ -285,7 +283,7 @@ func (s *Snapshot) Refresh(ctx context.Context, parts RefreshParts) error {
 	nodeGroups := make(map[string][]string)
 	for _, name := range proxies.Keys {
 		proxy := info[name]
-		if proxy == nil || !proxy.IsGroup() {
+		if proxy == nil || !proxy.IsGroup() || proxy.Type != selectorType {
 			continue
 		}
 		group := Group{
@@ -500,9 +498,11 @@ func (p *Proxy) isTestable() bool {
 // TestableNodes 过滤出可测节点。
 func (s *Snapshot) TestableNodes(members []string) []string {
 	out := make([]string, 0, len(members))
+	seen := make(map[string]bool, len(members))
 	for _, name := range members {
-		if s.IsTestable(name) {
+		if !seen[name] && s.IsTestable(name) {
 			out = append(out, name)
+			seen[name] = true
 		}
 	}
 	return out
@@ -597,6 +597,9 @@ func (s *Snapshot) ResolveGroup(want string) (*Group, error) {
 	if group, ok := s.FindGroup(want, true); ok {
 		return group, nil
 	}
+	if s.Info(want).IsGroup() {
+		return nil, &LookupError{Kind: "group", Want: want}
+	}
 	groups := s.AllGroups()
 	names := make([]string, 0, len(groups))
 	for _, group := range groups {
@@ -626,32 +629,43 @@ func (s *Snapshot) ResolveNode(want string, members []string) (string, error) {
 
 // Select 切换并返回切换前的节点。
 func (s *Snapshot) Select(ctx context.Context, group, node string) (string, bool, error) {
-	var previous string
-	var hasPrevious bool
-	if g, ok := s.FindGroup(group, true); ok {
-		previous, hasPrevious = g.Now, g.HasNow
-	} else {
-		info := s.Info(group)
-		previous, hasPrevious = info.Now, info.HasNow
+	g, ok := s.FindGroup(group, true)
+	if !ok {
+		return "", false, &LookupError{Kind: "group", Want: group}
 	}
-	if err := s.Client.Select(ctx, group, node); err != nil {
-		return previous, hasPrevious, err
-	}
-	return previous, hasPrevious, nil
+	return g.Now, g.HasNow, s.Client.Select(ctx, group, node)
 }
 
 // Measure 测单个节点，结果写进 s.delays。
 func (s *Snapshot) Measure(ctx context.Context, node string, timeoutMs int) (int, error) {
-	provider, _ := s.Owner(node)
-	delay, err := s.Client.Delay(ctx, node, provider, s.TestURL, timeoutMs)
-	if err != nil {
-		return 0, err
+	if timeoutMs <= 0 {
+		timeoutMs = DefaultDelayTimeoutMs
 	}
+	timeoutMs = min(timeoutMs, MaxDelayTimeoutMs)
+	probeCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
+	defer cancel()
+	provider, _ := s.Owner(node)
+	delay, err := s.Client.Delay(probeCtx, node, provider, s.TestURL, timeoutMs)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	s.setDelay(node, delay)
+	if probeCtx.Err() != nil {
+		delay = -1
+	} else if err != nil {
+		return 0, err
+	}
+	delay = checkedDelay(delay, timeoutMs)
+	s.delays[node] = delay
 	return delay, nil
+}
+
+func checkedDelay(delay, limit int) int {
+	if delay <= 0 || delay > limit {
+		return -1
+	}
+	return delay
 }
 
 // TestGroup 整组测速。
@@ -810,11 +824,7 @@ func (s *Snapshot) measureProvider(ctx context.Context, provider string, names [
 		previous, known := before[name]
 		sample := after[name]
 		if known && sample.newerThan(previous) {
-			delay := sample.record.Delay
-			if delay <= 0 {
-				delay = -1
-			}
-			delays[name] = delay
+			delays[name] = checkedDelay(sample.record.Delay, MaxDelayTimeoutMs)
 		}
 	}
 	if err := ctx.Err(); err != nil {

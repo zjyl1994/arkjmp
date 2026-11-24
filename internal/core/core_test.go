@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -170,13 +171,13 @@ func groupNames(groups []Group) []string {
 func TestGroupsHideGlobalByDefault(t *testing.T) {
 	_, snap := makeClient()
 	got := groupNames(snap.Groups(false))
-	want := []string{"Auto", "Manual"}
+	want := []string{"Manual"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("分组 = %v, 期望 %v", got, want)
 	}
 	all := groupNames(snap.Groups(true))
-	if all[len(all)-1] != GLOBAL {
-		t.Fatalf("GLOBAL 应该排最后，实际 %v", all)
+	if !slices.Equal(all, []string{"Manual", GLOBAL}) {
+		t.Fatalf("手动分组（含 GLOBAL）= %v", all)
 	}
 }
 
@@ -281,6 +282,35 @@ func TestSelectReturnsPrevious(t *testing.T) {
 	}
 }
 
+func TestOnlySelectorGroupsCanBeChanged(t *testing.T) {
+	proxies := map[string]any{
+		"Auto":     map[string]any{"type": "URLTest", "now": "HK", "all": []string{"HK"}},
+		"Backup":   map[string]any{"type": "Fallback", "now": "HK", "all": []string{"HK"}},
+		"Balanced": map[string]any{"type": "LoadBalance", "all": []string{"HK"}},
+		"Manual":   map[string]any{"type": "Selector", "now": "Auto", "all": []string{"Auto", "HK"}},
+		"HK":       map[string]any{"type": "Vless"},
+	}
+	api := newFake(proxies, nil)
+	snap := New(api, "")
+	if err := snap.Refresh(t.Context(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := groupNames(snap.AllGroups()); !slices.Equal(got, []string{"Manual"}) {
+		t.Fatalf("手动分组 = %v", got)
+	}
+	if got := snap.Chain("Manual"); !slices.Equal(got, []string{"Manual", "Auto", "HK"}) {
+		t.Fatalf("选择链 = %v", got)
+	}
+	for _, name := range []string{"Auto", "Backup", "Balanced"} {
+		if _, _, err := snap.Select(t.Context(), name, "HK"); err == nil {
+			t.Errorf("允许直接切换自动分组 %s", name)
+		}
+	}
+	if len(api.selected) != 0 {
+		t.Fatalf("向控制器发送了自动组切换请求: %v", api.selected)
+	}
+}
+
 func TestMeasureRecordsDelay(t *testing.T) {
 	fake, snap := makeClient()
 	fake.delays["HK-01"] = 55
@@ -293,9 +323,21 @@ func TestMeasureRecordsDelay(t *testing.T) {
 	}
 }
 
+func TestMeasureRejectsDelaysOverFiveSeconds(t *testing.T) {
+	fake, snap := makeClient()
+	fake.delays["HK-01"] = 5001
+	delay, err := snap.Measure(t.Context(), "HK-01", 6000)
+	if err != nil || delay != -1 {
+		t.Fatalf("delay = %d, err = %v", delay, err)
+	}
+	if got, ok := snap.Latency("HK-01"); !ok || got != -1 {
+		t.Fatalf("latency = %d,%v", got, ok)
+	}
+}
+
 func TestTestableNodesFiltersGroupsAndBuiltin(t *testing.T) {
 	_, snap := makeClient()
-	nodes := snap.TestableNodes([]string{"HK-01", "SG-01", "DIRECT", "REJECT", "Manual", "GLOBAL"})
+	nodes := snap.TestableNodes([]string{"HK-01", "SG-01", "DIRECT", "REJECT", "Manual", "GLOBAL", "Auto", "SG-01"})
 	if strings.Join(nodes, ",") != "HK-01,SG-01" {
 		t.Fatalf("可测节点 = %v", nodes)
 	}
@@ -482,5 +524,5 @@ func TestNodeRowShape(t *testing.T) {
 func ExampleSnapshot_Groups() {
 	_, snap := makeClient()
 	fmt.Println(strings.Join(groupNames(snap.Groups(false)), ","))
-	// Output: Auto,Manual
+	// Output: Manual
 }

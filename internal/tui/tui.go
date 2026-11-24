@@ -1,7 +1,7 @@
 // Package tui 是交互界面：人类手动挑节点用，逻辑全部复用 core.Snapshot。
 //
 // 基于 Bubble Tea（Elm 架构）：Update 处理按键/消息，View 只负责渲染当前状态。
-// 整组测速在后台 goroutine 里跑，进度通过 channel 以 tea.Msg 的形式送回主循环，
+// 测速在后台 goroutine 里跑，进度通过 tea.Msg 送回主循环，
 // 所以测速期间界面依然跟手。
 package tui
 
@@ -12,10 +12,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/rivo/uniseg"
 
 	"github.com/zjyl1994/arkjmp/internal/core"
 	"github.com/zjyl1994/arkjmp/internal/text"
@@ -30,24 +31,18 @@ var (
 	styleErr   = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
 )
 
-const helpLine = " 输入过滤  ←→ 分组  Ctrl+D 延迟  Ctrl+T 全组  Ctrl+O 排序  Ctrl+R 刷新  Esc 退出"
+const helpLine = " Enter 切换  ←→ 分组  Ctrl+D 延迟  Ctrl+T 全组  Ctrl+O 排序  Ctrl+R 刷新"
 
 // progressMsg 是整组测速的进度。
 type progressMsg struct {
-	stage string
+	id    uint64
 	done  int
 	total int
 	label string
 }
 
-// doneMsg 是整组测速的最终结果。
-type doneMsg struct {
-	group  string
-	result *core.TestResult
-	err    error
-}
-
 type actionMsg struct {
+	id      uint64
 	message string
 	kind    string
 	refresh bool
@@ -72,9 +67,11 @@ type model struct {
 	msg        string
 	kind       string
 
-	busy   bool
-	cancel context.CancelFunc
-	events chan tea.Msg
+	busy     bool
+	testing  bool
+	actionID uint64
+	cancel   context.CancelFunc
+	events   <-chan tea.Msg
 }
 
 // Run 进入交互界面，退出时返回 nil。
@@ -98,7 +95,7 @@ func newModel(ctx context.Context, snap *core.Snapshot) *model {
 	}
 	m.syncGroups()
 	if len(m.groups) == 0 {
-		m.setMsg("没读到任何分组，检查一下控制器地址/密码", "err")
+		m.setMsg("没有可切换的 Selector 分组", "err")
 	}
 	return m
 }
@@ -156,9 +153,12 @@ func (m *model) backspaceFilter() {
 	if m.filter == "" {
 		return
 	}
-	// 按 rune 删，别把多字节字符切成两半
-	runes := []rune(m.filter)
-	m.applyFilter(string(runes[:len(runes)-1]))
+	graphemes := uniseg.NewGraphemes(m.filter)
+	var lastStart int
+	for graphemes.Next() {
+		lastStart, _ = graphemes.Positions()
+	}
+	m.applyFilter(m.filter[:lastStart])
 }
 
 func (m *model) clearFilter() {
@@ -354,6 +354,9 @@ func (m *model) clampCursors() {
 
 func (m *model) viewHeight() int {
 	height := m.height - 4 // 标题/分组头/状态/帮助各占一行
+	if len(m.groups) > 1 {
+		height-- // 标签栏
+	}
 	if height < 0 {
 		return 0
 	}
@@ -376,8 +379,6 @@ func (m *model) scrollIntoView() {
 	}
 }
 
-// nodeLine 渲染一行节点；选中行整行反色，颜色统一交给选中样式。
-
 // ---------------- 更新 ----------------
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -394,6 +395,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case actionMsg:
+		if !m.busy || msg.id != m.actionID {
+			return m, nil
+		}
 		m.stopAction()
 		if msg.refresh {
 			m.syncGroups()
@@ -408,11 +412,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case progressMsg:
-		if msg.stage == "node" {
-			m.setMsg("测速: "+msg.label, "info")
-		} else {
-			m.setMsg(fmt.Sprintf("测速进度 … %d/%d 个 provider 已处理（%s）", msg.done, msg.total, msg.label), "info")
+		if !m.testing || msg.id != m.actionID {
+			return m, nil
 		}
+		m.setMsg(fmt.Sprintf("Esc 取消测速  %d/%d  %s", msg.done, msg.total, msg.label), "info")
 		if m.sortDelay {
 			m.refreshNodes()
 			m.followAnchor()
@@ -420,40 +423,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, waitForEvent(m.events)
 
-	case doneMsg:
-		m.stopAction()
-		m.events = nil
-		m.refreshNodes()
-		m.followAnchor()
-		m.scrollIntoView()
-		if msg.err != nil {
-			m.setMsg("测速失败: "+msg.err.Error(), "err")
-			return m, nil
-		}
-		tail := ""
-		if failed := msg.result.Failed(); failed > 0 {
-			tail = fmt.Sprintf("，%d 个无可用结果", failed)
-		}
-		if msg.result.Partial {
-			tail += "（部分 provider 节点未取得本轮结果）"
-		}
-		kind := "ok"
-		if len(msg.result.Failures) > 0 {
-			tail += "。错误: " + strings.Join(msg.result.SortedFailures(), "; ")
-		}
-		if msg.result.OK() == 0 {
-			kind = "err"
-		} else if msg.result.Partial || msg.result.Failed() > 0 {
-			kind = "warn"
-		}
-		m.setMsg(fmt.Sprintf("测速完成 [%s]：%d/%d 可用%s", msg.group, msg.result.OK(), msg.result.Total(), tail), kind)
-		// 自动分组的当前节点可能随测速变化。先显示结果，再同步分组状态。
-		return m, m.startAction("", func(ctx context.Context, snap *core.Snapshot) actionMsg {
-			return actionMsg{refresh: snap.Refresh(ctx, 0) == nil}
-		})
-
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
+	case tea.PasteMsg:
+		pasted := strings.Map(func(r rune) rune {
+			if unicode.IsControl(r) {
+				return -1
+			}
+			return r
+		}, msg.Content)
+		if pasted != "" {
+			m.appendFilter(pasted)
+		}
 	}
 	return m, nil
 }
@@ -467,6 +448,14 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// 有过滤词时先清过滤，没过滤才是退出
 		if m.filter != "" {
 			m.clearFilter()
+			return m, nil
+		}
+		if m.testing {
+			m.stopAction()
+			m.refreshNodes()
+			m.followAnchor()
+			m.scrollIntoView()
+			m.setMsg("已取消测速", "info")
 			return m, nil
 		}
 		m.stopAction()
@@ -613,8 +602,8 @@ func (m *model) testOne() tea.Cmd {
 		m.setMsg(name+" 没有延迟可测", "err")
 		return nil
 	}
-	return m.startAction("正在测试 "+name+" …", func(ctx context.Context, snap *core.Snapshot) actionMsg {
-		delay, err := snap.Measure(ctx, name, 5000)
+	cmd := m.startAction("Esc 取消测速  "+name+" …", func(ctx context.Context, snap *core.Snapshot) actionMsg {
+		delay, err := snap.Measure(ctx, name, core.DefaultDelayTimeoutMs)
 		if err != nil {
 			return actionMsg{message: "测试失败: " + err.Error(), kind: "err"}
 		}
@@ -623,15 +612,24 @@ func (m *model) testOne() tea.Cmd {
 		}
 		return actionMsg{message: fmt.Sprintf("%s: %dms", name, delay), kind: "ok", reorder: true}
 	})
+	if cmd != nil {
+		m.testing = true
+	}
+	return cmd
 }
 
 func (m *model) beginAction(message string) (context.Context, bool) {
 	if m.busy {
-		m.setMsg("操作进行中，请等待完成", "warn")
+		message := "操作进行中，请等待完成"
+		if m.testing {
+			message = "测速进行中，按 Esc 取消"
+		}
+		m.setMsg(message, "warn")
 		return nil, false
 	}
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.busy, m.cancel = true, cancel
+	m.actionID++
 	if message != "" {
 		m.setMsg(message, "info")
 	}
@@ -643,8 +641,12 @@ func (m *model) startAction(message string, work func(context.Context, *core.Sna
 	if !ok {
 		return nil
 	}
-	snap := m.snap
-	return func() tea.Msg { return work(ctx, snap) }
+	snap, id := m.snap, m.actionID
+	return func() tea.Msg {
+		msg := work(ctx, snap)
+		msg.id = id
+		return msg
+	}
 }
 
 // startTest 起一个后台测速 goroutine，并把第一条等待消息的 Cmd 交给 Bubble Tea。
@@ -653,34 +655,89 @@ func (m *model) startTest() (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
-	if len(m.snap.TestableNodes(group.Members)) == 0 {
+	nodes := m.snap.TestableNodes(group.Members)
+	if len(nodes) == 0 {
 		m.setMsg("当前分组没有可测节点", "err")
 		return m, nil
 	}
 
-	ctx, ok := m.beginAction("正在测速 [" + group.Name + "] …")
+	ctx, ok := m.beginAction("Esc 取消测速  [" + group.Name + "] …")
 	if !ok {
 		return m, nil
 	}
-	events := make(chan tea.Msg, 64)
+	events := make(chan tea.Msg)
 	m.events = events
+	m.testing = true
 
-	snap := m.snap
-	go func() {
-		defer close(events)
-		result, err := snap.TestGroup(ctx, group, func(stage string, done, total int, label string) {
-			select {
-			case events <- progressMsg{stage: stage, done: done, total: total, label: label}:
-			case <-ctx.Done():
-			}
-		}, 120*time.Second, 5000)
-		select {
-		case events <- doneMsg{group: group.Name, result: result, err: err}:
-		case <-ctx.Done():
-		}
-	}()
-
+	go testGroup(ctx, m.snap, m.actionID, group.Name, nodes, events)
 	return m, waitForEvent(events)
+}
+
+func testGroup(ctx context.Context, snap *core.Snapshot, id uint64, group string, nodes []string, events chan<- tea.Msg) {
+	defer close(events)
+	type sample struct {
+		name      string
+		available bool
+		err       error
+	}
+	// 限制同时发往控制器的请求数，机场节点也使用单节点超时。
+	const maxParallel = 8
+	jobs := make(chan string, len(nodes))
+	for _, name := range nodes {
+		jobs <- name
+	}
+	close(jobs)
+	results := make(chan sample, min(maxParallel, len(nodes)))
+	for range cap(results) {
+		go func() {
+			for name := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				delay, err := snap.Measure(ctx, name, core.DefaultDelayTimeoutMs)
+				select {
+				case results <- sample{name: name, available: err == nil && delay >= 0, err: err}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	available := 0
+	var firstErr error
+	for i := range nodes {
+		select {
+		case <-ctx.Done():
+			return
+		case result := <-results:
+			if result.available {
+				available++
+			}
+			if firstErr == nil {
+				firstErr = result.err
+			}
+			select {
+			case events <- progressMsg{id: id, done: i + 1, total: len(nodes), label: result.name}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+	kind := "ok"
+	if available == 0 {
+		kind = "err"
+	} else if available < len(nodes) {
+		kind = "warn"
+	}
+	message := fmt.Sprintf("测速完成 [%s]：%d/%d 可用", group, available, len(nodes))
+	if firstErr != nil {
+		message += "。错误: " + firstErr.Error()
+	}
+	select {
+	case events <- actionMsg{id: id, message: message, kind: kind, reorder: true}:
+	case <-ctx.Done():
+	}
 }
 
 func (m *model) stopAction() {
@@ -689,6 +746,8 @@ func (m *model) stopAction() {
 		m.cancel = nil
 	}
 	m.busy = false
+	m.testing = false
+	m.events = nil
 }
 
 // waitForEvent 把后台 goroutine 的下一条消息变成 tea.Msg。
@@ -728,7 +787,8 @@ func (m *model) render() string {
 	if hasGroup {
 		header = " " + group.Name
 		if len(m.groups) > 1 {
-			header += fmt.Sprintf(" (%d/%d)", m.gi+1, len(m.groups))
+			lines = append(lines, m.tabLine(width))
+			header = ""
 		}
 		if m.sortDelay {
 			header += "   ⇅ 按延迟排序"
@@ -764,10 +824,50 @@ func (m *model) render() string {
 		lines = append(lines, m.nodeLine(nodes[position], position == index, group, nameWidth, latencyWidth, width))
 	}
 
-	lines = append(lines, m.msgLine(width), styleTitle.Render(text.Fit(helpLine, width, true)))
+	escape := "Esc 退出"
+	switch {
+	case m.filter != "":
+		escape = "Esc 清过滤"
+	case m.testing:
+		escape = "Esc 取消测速"
+	}
+	lines = append(lines, m.msgLine(width), styleTitle.Render(text.Fit(" "+escape+"  "+helpLine, width, true)))
 	return strings.Join(lines, "\n")
 }
 
+func (m *model) tabLine(width int) string {
+	const gap = " "
+	active := text.Fit("["+m.groups[m.gi].Name+"]", width, false)
+	remaining := width - text.DispWidth(active)
+	left, right := m.gi, m.gi+1
+	for right < len(m.groups) {
+		needed := len(gap) + text.DispWidth(m.groups[right].Name)
+		if needed > remaining {
+			break
+		}
+		remaining -= needed
+		right++
+	}
+	for left > 0 {
+		needed := len(gap) + text.DispWidth(m.groups[left-1].Name)
+		if needed > remaining {
+			break
+		}
+		remaining -= needed
+		left--
+	}
+	tabs := make([]string, 0, right-left)
+	for i := left; i < right; i++ {
+		if i == m.gi {
+			tabs = append(tabs, styleSel.Render(active))
+		} else {
+			tabs = append(tabs, m.groups[i].Name)
+		}
+	}
+	return strings.Join(tabs, gap)
+}
+
+// nodeLine 渲染节点行，光标所在行整行反色。
 func (m *model) nodeLine(name string, selected bool, group core.Group, nameWidth, latencyWidth, width int) string {
 	info := m.snap.Info(name)
 	mark := "○"

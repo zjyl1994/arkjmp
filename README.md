@@ -24,12 +24,13 @@ ARKJMP_SECRET=
 
 ## 默认行为
 
-- 不带子命令时进入 TUI。
+- 不带子命令时进入 TUI，打开第一个手动分组。多个手动分组显示为标签页。
+- 支持切换 `Selector` 手动分组，手动组内的自动组仍可作为候选项。
 - 控制器默认 `http://127.0.0.1:9090`；地址和密码依次从命令行参数、环境变量、`.env`、
   mihomo 的 `config.json`/`config.yaml` 获取，找不到密码就不带鉴权。
 - `GLOBAL` 分组默认隐藏（`--show-global` 或 TUI 的 `Ctrl+G` 打开）。
-- 测速默认用 `https://cp.cloudflare.com/generate_204`，单节点超时 5 秒；
-  机场节点走 provider 批量 healthcheck。`test --wait` 限制 provider 阶段的等待时间（默认 120 秒），内置节点仍按单节点超时测速。
+- 测速默认用 `https://cp.cloudflare.com/generate_204`，单节点请求默认超时 3 秒，上限 5 秒。超过 5 秒的延迟视为超时。
+  TUI 在后台并发测当前组内的节点。CLI 的 `test` 对机场节点使用 provider 批量 healthcheck，`--wait` 限制 provider 阶段的等待时间（默认 120 秒）。
   整组报告只统计本轮结果，缺少新样本的 provider 节点在 JSON 中显示为 `delay: null`。
 - 结果输出到 stdout，进度/提示输出到 stderr；`--json` 时 stdout 只有一个 JSON 对象，
   退出码稳定（0 成功 / 1 连接或 API 错误 / 2 参数错误 / 3 目标不存在 / 4 操作不适用）。
@@ -51,14 +52,14 @@ ARKJMP_SECRET=
 
 | 键 | 作用 |
 | --- | --- |
-| 直接输入字母/数字 | 按名字过滤 |
+| 直接输入或粘贴 | 按名字过滤，支持 emoji |
 | `↑`/`↓`、`PgUp`/`PgDn`、`Home`/`End` | 移动 / 翻页 / 首尾 |
 | `Enter` | 切换为选中节点 |
-| `Tab` / `←`/`→` | 切换分组 |
+| `Tab` / `←`/`→` | 切换分组标签页 |
 | `Ctrl+D` / `Ctrl+T` | 测单节点 / 整组测速 |
 | `Ctrl+O` / `Ctrl+R` | 按延迟排序 / 刷新 |
 | `Ctrl+G` | 显示/隐藏 GLOBAL |
-| `Esc` | 清过滤；没有过滤时退出（`Ctrl+C` 始终退出） |
+| `Esc` | 有过滤词时清除过滤，测速中取消测速，空闲时退出（`Ctrl+C` 始终退出） |
 
 ## 开发
 

@@ -16,6 +16,22 @@ const examplesAndExitCodes = `示例:
 
 退出码: 0 成功 | 1 连接/API 错误 | 2 参数错误 | 3 目标不存在 | 4 操作不适用`
 
+const agentWorkflow = `Agent 操作流程
+  从查询结果复制完整的分组名和节点名，替换示例里的 Manual 和 HK-01。
+
+  arkjmp groups --json
+    从 groups[].name 获取手动分组名。
+  arkjmp group 'Manual' --json
+    从 nodes[].name 获取节点名。
+  arkjmp switch 'Manual' 'HK-01' --dry-run --json
+    核对返回的 group 和 node。would_change 为 false 时已选中目标。
+  arkjmp switch 'Manual' 'HK-01' --json
+    确认预览目标后提交切换。
+  arkjmp current --group 'Manual' --json
+    核对 current[].group 和 current[].now，确认当前选择。
+
+  解析 stdout 的 JSON，并检查退出码和 ok。命令失败时查看 error.message。`
+
 const globalOptions = `options:
   -h, --help           显示帮助并退出
   --api API            external-controller 完整地址，如 http://127.0.0.1:9090（默认取 .env）
@@ -43,7 +59,7 @@ positional arguments:
     tui (ui)            交互式界面（默认）
     status              控制器版本/模式/分组概况
     list                打印所有分组和节点（兼容旧版 --list）
-    groups              列出分组
+    groups              列出手动分组（Selector）
     group               查看单个分组的节点（只有一个分组时可省略）
     nodes               列出节点（默认合并所有分组）
     current             查看当前选中节点
@@ -53,7 +69,7 @@ positional arguments:
     delay (ping)        测单个节点延迟
     test                整组测速（机场走 provider 批量 healthcheck）
 
-` + globalOptions + "\n\n" + examplesAndExitCodes + "\n"
+` + globalOptions + "\n\n" + agentWorkflow + "\n\n" + examplesAndExitCodes + "\n"
 }
 
 // commandHelp 是单个子命令的 --help 输出。
@@ -121,7 +137,7 @@ func commandHelp(prog, command string) string {
 			usage: "[options] 节点",
 			desc:  "测单个节点延迟（别名 ping）",
 			args:  [][2]string{{"节点", "节点名（支持唯一前缀）"}},
-			flags: [][2]string{{"--timeout-ms", "测速超时毫秒（默认 5000）"}},
+			flags: [][2]string{{"--timeout-ms", "测速超时毫秒（默认 3000，上限 5000）"}},
 		},
 		"test": {
 			usage: "[options]",
@@ -160,6 +176,9 @@ func commandHelp(prog, command string) string {
 		for _, flag := range item.flags {
 			b.WriteString("  " + padRight(flag[0], 20) + flag[1] + "\n")
 		}
+	}
+	if command == "switch" {
+		b.WriteString("\n" + agentWorkflow + "\n")
 	}
 	b.WriteString("\n" + examplesAndExitCodes + "\n")
 	return b.String()

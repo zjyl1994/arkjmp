@@ -185,6 +185,9 @@ func TestDelayUsesProviderPathAndTranslatesResult(t *testing.T) {
 			paths = append(paths, r.URL.Path)
 			io.WriteString(w, `{"delay":0}`)
 		},
+		"/proxies/slow/delay": func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusGatewayTimeout)
+		},
 		"/providers/proxies/airport/healthcheck": func(w http.ResponseWriter, r *http.Request) {
 			paths = append(paths, r.URL.Path)
 			io.WriteString(w, `{}`)
@@ -207,6 +210,9 @@ func TestDelayUsesProviderPathAndTranslatesResult(t *testing.T) {
 	// delay<=0 统一成 -1（超时/无结果）
 	if delay, err = c.Delay(t.Context(), "DIRECT", "", "u", 1000); err != nil || delay != -1 {
 		t.Fatalf("DIRECT delay = %d, %v", delay, err)
+	}
+	if delay, err = c.Delay(t.Context(), "slow", "", "u", 1000); err != nil || delay != -1 {
+		t.Fatalf("slow delay = %d, %v", delay, err)
 	}
 	if err := c.ProviderHealthcheck(t.Context(), "airport"); err != nil {
 		t.Fatal(err)

@@ -33,6 +33,7 @@ func (fakeAPI) Proxies(context.Context) (*client.Object, error) {
 		"GLOBAL": map[string]any{"type": "Selector", "now": "Manual", "all": []string{"Manual"}},
 		"Manual": map[string]any{"type": "Selector", "now": "HK-01", "all": []string{"HK-01", "SG-01"}},
 		"Auto":   map[string]any{"type": "URLTest", "now": "SG-01", "all": []string{"SG-01"}},
+		"Media":  map[string]any{"type": "Selector", "now": "SG-01", "all": []string{"SG-01"}},
 		"HK-01":  map[string]any{"type": "Vless", "history": []map[string]any{{"delay": 120}}},
 		"SG-01":  map[string]any{"type": "Vless", "history": []map[string]any{}},
 	})
@@ -41,7 +42,7 @@ func (fakeAPI) Proxies(context.Context) (*client.Object, error) {
 func fakeProxies(items map[string]any) (*client.Object, error) {
 	obj := &client.Object{Items: map[string]jsontext.Value{}}
 	// 固定顺序，保证 tests 结果稳定
-	for _, name := range []string{"GLOBAL", "Manual", "Auto", "HK-01", "SG-01"} {
+	for _, name := range []string{"GLOBAL", "Manual", "Auto", "Media", "HK-01", "SG-01"} {
 		value, ok := items[name]
 		if !ok {
 			continue
@@ -167,6 +168,7 @@ func TestParseRejectsBadInput(t *testing.T) {
 		{"test", "--wait", "-1"},
 		{"test", "--wait", "+Inf"},
 		{"delay", "HK-01", "--timeout-ms", "0"},
+		{"delay", "HK-01", "--timeout-ms", "5001"},
 		{"switch", "--index", "1.5"},
 	}
 	for _, argv := range cases {
@@ -260,7 +262,7 @@ func TestMultipleGroupsStillRequireGroup(t *testing.T) {
 	if !errors.As(err, &cmdErr) || cmdErr.Code != ExitUsage {
 		t.Fatalf("错误 = %v", err)
 	}
-	if !strings.Contains(cmdErr.Msg, "Auto") {
+	if !strings.Contains(cmdErr.Msg, "Media") || strings.Contains(cmdErr.Msg, "Auto") {
 		t.Fatalf("错误信息 = %q", cmdErr.Msg)
 	}
 }

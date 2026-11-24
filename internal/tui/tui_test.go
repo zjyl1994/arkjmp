@@ -65,7 +65,7 @@ func (f *fakeAPI) ProviderHealthcheck(_ context.Context, provider string) error 
 
 func fakeObject(items map[string]any) (*client.Object, error) {
 	obj := &client.Object{Items: map[string]jsontext.Value{}}
-	for _, name := range []string{"GLOBAL", "Manual", "HK-01", "SG-01"} {
+	for _, name := range []string{"GLOBAL", "Auto", "Manual", "Media", "HK-01", "SG-01"} {
 		value, ok := items[name]
 		if !ok {
 			continue
@@ -104,6 +104,8 @@ func key(name string) tea.KeyPressMsg {
 		"enter":  tea.KeyEnter,
 		"esc":    tea.KeyEscape,
 		"tab":    tea.KeyTab,
+		"left":   tea.KeyLeft,
+		"right":  tea.KeyRight,
 		"up":     tea.KeyUp,
 		"down":   tea.KeyDown,
 		"pgup":   tea.KeyPgUp,
@@ -208,6 +210,40 @@ func TestModelScrollsAndKeepsCursorVisible(t *testing.T) {
 	}
 }
 
+type tabsAPI struct{ *fakeAPI }
+
+func (tabsAPI) Proxies(context.Context) (*client.Object, error) {
+	return fakeObject(map[string]any{
+		"Auto":   map[string]any{"type": "URLTest", "all": []string{"HK-01"}},
+		"Manual": map[string]any{"type": "Selector", "all": []string{"Auto", "HK-01", "🇭🇰 香港 👩🏽‍💻"}},
+		"Media":  map[string]any{"type": "Selector", "all": []string{"SG-01"}},
+	})
+}
+
+func TestModelOpensFirstSelectorTab(t *testing.T) {
+	snap := core.New(tabsAPI{&fakeAPI{}}, "")
+	if err := snap.Refresh(t.Context(), 0); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(t.Context(), snap)
+	for _, step := range []struct {
+		key  string
+		tabs string
+		node string
+	}{
+		{"", styleSel.Render("[Manual]") + " Media", "Auto"},
+		{"right", "Manual " + styleSel.Render("[Media]"), "SG-01"},
+		{"left", styleSel.Render("[Manual]") + " Media", "Auto"},
+	} {
+		if step.key != "" {
+			press(m, step.key)
+		}
+		if got := m.tabLine(80); got != step.tabs || m.nodes()[0] != step.node {
+			t.Fatalf("标签页 = %q，节点 = %v", got, m.nodes())
+		}
+	}
+}
+
 func TestModelRunsGroupTestInBackground(t *testing.T) {
 	m, _ := newTestModel(t)
 	cmd := press(m, "ctrl+t")
@@ -215,19 +251,8 @@ func TestModelRunsGroupTestInBackground(t *testing.T) {
 		t.Fatal("按 Ctrl+T 应该开始测速")
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
-	for m.events != nil && time.Now().Before(deadline) {
-		select {
-		case msg := <-m.events:
-			_, next := m.Update(msg)
-			if m.events == nil {
-				finishAction(t, m, next)
-			}
-		case <-time.After(20 * time.Millisecond):
-		}
-	}
-	if m.events != nil {
-		t.Fatal("测速没有在预期时间内结束")
+	for cmd != nil {
+		_, cmd = m.Update(cmd())
 	}
 	view := m.render()
 	if !strings.Contains(view, "测速完成 [Manual]：2/2 可用") {
@@ -339,7 +364,8 @@ func TestModelKeepsSelectionWhenDelaysReorder(t *testing.T) {
 	if _, err := snap.Measure(t.Context(), "SG-01", 1000); err != nil {
 		t.Fatal(err)
 	}
-	m.Update(progressMsg{stage: "node"})
+	m.testing = true
+	m.Update(progressMsg{id: m.actionID})
 	if got := m.nodes(); got[0] != "SG-01" {
 		t.Fatalf("重排后 nodes=%v", got)
 	}
@@ -419,10 +445,29 @@ func TestModelFiltersByName(t *testing.T) {
 	}
 }
 
+func TestModelFiltersPastedEmojiAndDeletesWholeGraphemes(t *testing.T) {
+	snap := core.New(tabsAPI{&fakeAPI{}}, "")
+	if err := snap.Refresh(t.Context(), 0); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(t.Context(), snap)
+	const name = "🇭🇰 香港 👩🏽‍💻"
+	_, cmd := m.Update(tea.PasteMsg{Content: name + "\r\n"})
+	if cmd != nil || m.filter != name || len(m.nodes()) != 1 || m.nodes()[0] != name {
+		t.Fatalf("粘贴后过滤词 = %q，节点 = %v", m.filter, m.nodes())
+	}
+	for _, want := range []string{"🇭🇰 香港 ", "🇭🇰 香港", "🇭🇰 香", "🇭🇰 ", "🇭🇰", ""} {
+		press(m, "backspace")
+		if m.filter != want {
+			t.Fatalf("退格后过滤词 = %q，期望 %q", m.filter, want)
+		}
+	}
+}
+
 func TestModelShowsErrorWhenNoGroups(t *testing.T) {
 	snap := core.New(emptyAPI{}, "")
 	m := newModel(t.Context(), snap)
-	if view := m.render(); !strings.Contains(view, "没读到任何分组") {
+	if view := m.render(); !strings.Contains(view, "没有可切换的 Selector") {
 		t.Fatalf("没有任何分组时应该提示:\n%s", view)
 	}
 }
@@ -449,7 +494,10 @@ type blockingDelay struct {
 }
 
 func (f blockingDelay) Delay(ctx context.Context, _, _, _ string, _ int) (int, error) {
-	close(f.started)
+	select {
+	case f.started <- struct{}{}:
+	case <-ctx.Done():
+	}
 	<-ctx.Done()
 	return 0, ctx.Err()
 }
@@ -480,6 +528,58 @@ func TestModelNavigatesAndQuitsDuringSingleTest(t *testing.T) {
 		msg := (<-result).(actionMsg)
 		if !strings.Contains(msg.message, context.Canceled.Error()) {
 			t.Fatalf("退出后测速结果 = %+v", msg)
+		}
+	})
+}
+
+func TestModelCanSwitchImmediatelyAfterCancelingTest(t *testing.T) {
+	for _, shortcut := range []string{"ctrl+d", "ctrl+t"} {
+		t.Run(shortcut, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				api := blockingDelay{fakeAPI: &fakeAPI{}, started: make(chan struct{}, 2)}
+				snap := core.New(api, "")
+				if err := snap.Refresh(t.Context(), 0); err != nil {
+					t.Fatal(err)
+				}
+				m := newModel(t.Context(), snap)
+				cmd := press(m, shortcut)
+				result := make(chan tea.Msg, 1)
+				go func() { result <- cmd() }()
+				<-api.started
+				if shortcut == "ctrl+t" {
+					<-api.started // 两个节点并发测速
+				}
+				press(m, "SG")
+				if press(m, "esc") != nil || !m.testing || m.filter != "" {
+					t.Fatal("第一次 Esc 应该清除过滤词，继续测速")
+				}
+				if press(m, "esc") != nil || m.busy || m.msg != "已取消测速" {
+					t.Fatal("第二次 Esc 应该取消测速并保留界面")
+				}
+				switchCmd := press(m, "down", "enter")
+				m.Update(<-result) // 旧命令返回时切换已经开始。
+				finishAction(t, m, switchCmd)
+				if len(api.chosen) != 1 || api.chosen[0] != [2]string{"Manual", "SG-01"} ||
+					!strings.Contains(m.msg, "已切换") {
+					t.Fatalf("切换请求 = %v，状态 = %s", api.chosen, m.msg)
+				}
+			})
+		})
+	}
+}
+
+func TestModelSingleTestTimesOutAfterThreeSeconds(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		api := blockingDelay{fakeAPI: &fakeAPI{}, started: make(chan struct{}, 1)}
+		snap := core.New(api, "")
+		if err := snap.Refresh(t.Context(), 0); err != nil {
+			t.Fatal(err)
+		}
+		m := newModel(t.Context(), snap)
+		start := time.Now()
+		finishAction(t, m, press(m, "ctrl+d"))
+		if elapsed := time.Since(start); elapsed != 3*time.Second || m.msg != "HK-01: 超时" {
+			t.Fatalf("耗时 = %v，状态 = %s", elapsed, m.msg)
 		}
 	})
 }
