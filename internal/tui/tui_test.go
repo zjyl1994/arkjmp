@@ -20,6 +20,7 @@ type fakeAPI struct {
 	delay      int
 	proxyCalls int
 	proxiesErr error
+	fallback   bool
 	chosen     [][2]string
 	checkin    []string
 }
@@ -37,9 +38,16 @@ func (f *fakeAPI) Proxies(context.Context) (*client.Object, error) {
 	if len(f.chosen) > 0 {
 		now = f.chosen[len(f.chosen)-1][1]
 	}
+	manual := map[string]any{"type": "Selector", "now": now, "all": []string{"HK-01", "SG-01"}}
+	if f.fallback {
+		manual["type"] = "Fallback"
+		if len(f.chosen) > 0 {
+			manual["fixed"] = now
+		}
+	}
 	return fakeObject(map[string]any{
 		"GLOBAL": map[string]any{"type": "Selector", "now": "Manual", "all": []string{"Manual"}},
-		"Manual": map[string]any{"type": "Selector", "now": now, "all": []string{"HK-01", "SG-01"}},
+		"Manual": manual,
 		"HK-01":  map[string]any{"type": "Vless", "history": []map[string]any{{"delay": 120}}},
 		"SG-01":  map[string]any{"type": "Vless", "history": []map[string]any{}},
 	})
@@ -188,6 +196,27 @@ func TestModelQuitsOnEscape(t *testing.T) {
 	}
 	if _, ok := cmd().(tea.QuitMsg); !ok {
 		t.Fatal("按 Esc 返回的不是 QuitMsg")
+	}
+}
+
+func TestModelPinsCurrentFallbackNode(t *testing.T) {
+	api := &fakeAPI{fallback: true}
+	snap := core.New(api, "")
+	if err := snap.Refresh(t.Context(), 0); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(t.Context(), snap)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	finishAction(t, m, press(m, "enter"))
+	if len(api.chosen) != 1 || api.chosen[0] != [2]string{"Manual", "HK-01"} {
+		t.Fatalf("Fallback 切换请求 = %v", api.chosen)
+	}
+	if view := m.render(); !strings.Contains(view, "固定: HK-01") {
+		t.Fatalf("未显示固定节点:\n%s", view)
+	}
+	if cmd := press(m, "enter"); cmd != nil {
+		t.Fatal("节点已固定，重复回车不应再次提交切换")
 	}
 }
 
@@ -467,7 +496,7 @@ func TestModelFiltersPastedEmojiAndDeletesWholeGraphemes(t *testing.T) {
 func TestModelShowsErrorWhenNoGroups(t *testing.T) {
 	snap := core.New(emptyAPI{}, "")
 	m := newModel(t.Context(), snap)
-	if view := m.render(); !strings.Contains(view, "没有可切换的 Selector") {
+	if view := m.render(); !strings.Contains(view, "没有可切换的分组") {
 		t.Fatalf("没有任何分组时应该提示:\n%s", view)
 	}
 }

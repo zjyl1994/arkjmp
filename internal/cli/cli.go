@@ -916,13 +916,13 @@ func cmdSwitch(ctx context.Context, o *Options) error {
 	}
 
 	if o.DryRun {
-		wouldChange := node != previous
+		wouldChange := !group.IsSelected(node)
 		payload.WouldChange = &wouldChange
 		payload.OK = true
 		return oo.emit(payload, []string{fmt.Sprintf("[%s] %s → %s（dry-run，未提交）", group.Name, orDash(group.Now, group.HasNow), node)})
 	}
 
-	if node == previous && group.HasNow {
+	if group.IsSelected(node) {
 		payload.OK = true
 		return oo.emit(payload, []string{fmt.Sprintf("[%s] 当前已经是 %s", group.Name, node)})
 	}
@@ -933,19 +933,19 @@ func cmdSwitch(ctx context.Context, o *Options) error {
 	if err := snap.Refresh(ctx, 0); err != nil {
 		return err
 	}
-	verified, hasVerified := "", false
-	if refreshed, ok := snap.FindGroup(group.Name, true); ok {
-		verified, hasVerified = refreshed.Now, refreshed.HasNow
-	} else {
-		verified, hasVerified = group.Now, group.HasNow
+	refreshed, ok := snap.FindGroup(group.Name, true)
+	if !ok || !refreshed.HasNow {
+		return apiErr("切换已提交，但控制器未返回当前节点")
 	}
-	changed := hasVerified && verified == node
-	payload.Changed = changed
-	payload.Now = nullableString(verified, hasVerified)
+	if refreshed.Now != node {
+		return apiErr("切换已提交，但控制器返回的当前节点是 '%s'", refreshed.Now)
+	}
+	if !refreshed.IsSelected(node) {
+		return apiErr("切换已提交，但控制器未固定节点 '%s'", node)
+	}
+	payload.Changed = true
+	payload.Now = &refreshed.Now
 	payload.OK = true
-	if !changed {
-		return apiErr("切换已提交，但控制器返回的当前节点是 '%s'", verified)
-	}
 	return oo.emit(payload, []string{fmt.Sprintf("已切换 [%s] %s → %s", group.Name, orDash(previous, group.HasNow), node)})
 }
 

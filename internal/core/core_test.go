@@ -282,7 +282,7 @@ func TestSelectReturnsPrevious(t *testing.T) {
 	}
 }
 
-func TestOnlySelectorGroupsCanBeChanged(t *testing.T) {
+func TestOnlySelectorAndFallbackGroupsCanBeChanged(t *testing.T) {
 	proxies := map[string]any{
 		"Auto":     map[string]any{"type": "URLTest", "now": "HK", "all": []string{"HK"}},
 		"Backup":   map[string]any{"type": "Fallback", "now": "HK", "all": []string{"HK"}},
@@ -295,19 +295,25 @@ func TestOnlySelectorGroupsCanBeChanged(t *testing.T) {
 	if err := snap.Refresh(t.Context(), 0); err != nil {
 		t.Fatal(err)
 	}
-	if got := groupNames(snap.AllGroups()); !slices.Equal(got, []string{"Manual"}) {
-		t.Fatalf("手动分组 = %v", got)
+	if got := groupNames(snap.AllGroups()); !slices.Equal(got, []string{"Backup", "Manual"}) {
+		t.Fatalf("可切换的分组 = %v", got)
 	}
 	if got := snap.Chain("Manual"); !slices.Equal(got, []string{"Manual", "Auto", "HK"}) {
 		t.Fatalf("选择链 = %v", got)
 	}
-	for _, name := range []string{"Auto", "Backup", "Balanced"} {
+	for _, name := range []string{"Auto", "Balanced"} {
 		if _, _, err := snap.Select(t.Context(), name, "HK"); err == nil {
 			t.Errorf("允许直接切换自动分组 %s", name)
 		}
 	}
 	if len(api.selected) != 0 {
 		t.Fatalf("向控制器发送了自动组切换请求: %v", api.selected)
+	}
+	if _, _, err := snap.Select(t.Context(), "Backup", "HK"); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.selected) != 1 || api.selected[0] != [2]string{"Backup", "HK"} {
+		t.Fatalf("Fallback 切换请求 = %v", api.selected)
 	}
 }
 

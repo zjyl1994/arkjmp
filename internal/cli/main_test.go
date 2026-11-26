@@ -15,12 +15,12 @@ import (
 )
 
 // newFakeController 起一个最小的 mihomo 控制器，顺便验证鉴权头。
-func newFakeController(t *testing.T) *httptest.Server {
+func newFakeController(t *testing.T, groupType string, keepPin bool) *httptest.Server {
 	t.Helper()
 
 	proxies := map[string]any{
 		"GLOBAL": map[string]any{"type": "Selector", "now": "Manual", "all": []string{"Manual"}},
-		"Manual": map[string]any{"type": "Selector", "now": "HK-01", "all": []string{"HK-01", "SG-01", "DIRECT"}},
+		"Manual": map[string]any{"type": groupType, "now": "HK-01", "all": []string{"HK-01", "SG-01", "DIRECT"}},
 		"HK-01":  map[string]any{"type": "Vless", "history": []map[string]any{{"delay": 120}}},
 		"SG-01":  map[string]any{"type": "Vless", "history": []map[string]any{}},
 		"DIRECT": map[string]any{"type": "Direct"},
@@ -71,7 +71,15 @@ func newFakeController(t *testing.T) *httptest.Server {
 			return
 		}
 		mu.Lock()
-		proxies["Manual"].(map[string]any)["now"] = body.Name
+		group := proxies["Manual"].(map[string]any)
+		group["now"] = body.Name
+		if groupType == "Fallback" {
+			if keepPin {
+				group["fixed"] = body.Name
+			} else {
+				group["fixed"] = ""
+			}
+		}
 		mu.Unlock()
 		writeJSON(w, map[string]any{"ok": true})
 	})
@@ -159,7 +167,7 @@ func decodeJSON[T any](t *testing.T, raw string) T {
 }
 
 func TestMainEndToEnd(t *testing.T) {
-	server := newFakeController(t)
+	server := newFakeController(t, "Selector", false)
 	setupEnv(t, server.URL)
 
 	t.Run("status", func(t *testing.T) {
@@ -242,6 +250,39 @@ func TestMainEndToEnd(t *testing.T) {
 			t.Fatalf("exit = %d", code)
 		}
 	})
+}
+
+func TestMainSwitchPinsCurrentFallbackNode(t *testing.T) {
+	server := newFakeController(t, "Fallback", true)
+	setupEnv(t, server.URL)
+
+	preview := func(wantChange bool) {
+		t.Helper()
+		raw, code := runMain(t, "switch", "Manual", "HK-01", "--dry-run", "--json")
+		got := decodeJSON[switchPayload](t, raw)
+		if code != ExitOK || got.WouldChange == nil || *got.WouldChange != wantChange {
+			t.Fatalf("exit = %d, preview = %s", code, raw)
+		}
+	}
+	preview(true)
+
+	raw, code := runMain(t, "switch", "Manual", "HK-01", "--json")
+	got := decodeJSON[switchPayload](t, raw)
+	if code != ExitOK || !got.Changed || got.Now == nil || *got.Now != "HK-01" {
+		t.Fatalf("exit = %d, switch = %s", code, raw)
+	}
+	preview(false)
+}
+
+func TestMainSwitchReportsLostFallbackPin(t *testing.T) {
+	server := newFakeController(t, "Fallback", false)
+	setupEnv(t, server.URL)
+
+	raw, code := runMain(t, "switch", "Manual", "HK-01", "--json")
+	got := decodeJSON[errorPayload](t, raw)
+	if code != ExitError || got.OK || !strings.Contains(got.Error.Message, "未固定节点") {
+		t.Fatalf("exit = %d, switch = %s", code, raw)
+	}
 }
 
 func TestJSONUsageErrors(t *testing.T) {

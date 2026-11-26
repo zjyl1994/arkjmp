@@ -95,7 +95,7 @@ func newModel(ctx context.Context, snap *core.Snapshot) *model {
 	}
 	m.syncGroups()
 	if len(m.groups) == 0 {
-		m.setMsg("没有可切换的 Selector 分组", "err")
+		m.setMsg("没有可切换的分组（Selector 或 Fallback）", "err")
 	}
 	return m
 }
@@ -557,7 +557,7 @@ func (m *model) apply() tea.Cmd {
 		return nil
 	}
 	name := nodes[m.index()]
-	if group.HasNow && name == group.Now && !m.busy {
+	if group.IsSelected(name) && !m.busy {
 		m.setMsg(fmt.Sprintf("[%s] 当前已经是 %s", group.Name, name), "ok")
 		return nil
 	}
@@ -574,6 +574,9 @@ func (m *model) apply() tea.Cmd {
 		}
 		if current.Now != name {
 			return actionMsg{message: fmt.Sprintf("切换已提交，当前节点为 %s", current.Now), kind: "err", refresh: true}
+		}
+		if !current.IsSelected(name) {
+			return actionMsg{message: "切换已提交，控制器未固定节点 " + name, kind: "err", refresh: true}
 		}
 		return actionMsg{message: fmt.Sprintf("已切换 [%s] → %s", group.Name, name), kind: "ok", refresh: true}
 	})
@@ -803,6 +806,9 @@ func (m *model) render() string {
 			} else {
 				header += "   当前: " + group.Now
 			}
+		}
+		if group.Fixed != "" {
+			header += "   固定: " + group.Fixed
 		}
 	}
 	lines = append(lines, styleOK.Render(text.Fit(header, width, true)))

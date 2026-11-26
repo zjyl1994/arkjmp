@@ -22,6 +22,7 @@ const (
 	DefaultDelayTimeoutMs = 3000
 	MaxDelayTimeoutMs     = 5000
 	selectorType          = "Selector"
+	fallbackType          = "Fallback"
 )
 
 // 这些"节点"根本没有延迟可测。
@@ -63,6 +64,7 @@ type Proxy struct {
 	Type         string
 	Now          string
 	HasNow       bool
+	Fixed        string
 	All          []string
 	HasAll       bool
 	History      []HistoryRecord
@@ -86,6 +88,9 @@ func decodeProxy(raw jsontext.Value) *Proxy {
 	if v, ok := fields["now"]; ok && !isNull(v) {
 		p.HasNow = true
 		_ = json.Unmarshal(v, &p.Now)
+	}
+	if v, ok := fields["fixed"]; ok {
+		_ = json.Unmarshal(v, &p.Fixed)
 	}
 	if v, ok := fields["all"]; ok && !isNull(v) {
 		p.HasAll = true
@@ -131,6 +136,7 @@ type Group struct {
 	Type    string
 	Now     string
 	HasNow  bool
+	Fixed   string
 	Members []string
 }
 
@@ -139,6 +145,11 @@ func (g Group) Count() int { return len(g.Members) }
 
 // Current 返回当前选中的节点名（没有就是空串）。
 func (g Group) Current() string { return g.Now }
+
+// IsSelected 判断节点是否已手动选中；Fallback 的当前节点也可能是自动选的。
+func (g Group) IsSelected(node string) bool {
+	return g.HasNow && g.Now == node && (g.Type != fallbackType || g.Fixed == node)
+}
 
 // HistoryDelay 是"只看 mihomo 记录的历史延迟"。
 func (p *Proxy) HistoryDelay() (int, bool) {
@@ -283,7 +294,7 @@ func (s *Snapshot) Refresh(ctx context.Context, parts RefreshParts) error {
 	nodeGroups := make(map[string][]string)
 	for _, name := range proxies.Keys {
 		proxy := info[name]
-		if proxy == nil || !proxy.IsGroup() || proxy.Type != selectorType {
+		if proxy == nil || !proxy.IsGroup() || (proxy.Type != selectorType && proxy.Type != fallbackType) {
 			continue
 		}
 		group := Group{
@@ -291,6 +302,7 @@ func (s *Snapshot) Refresh(ctx context.Context, parts RefreshParts) error {
 			Type:    proxy.Type,
 			Now:     proxy.Now,
 			HasNow:  proxy.HasNow,
+			Fixed:   proxy.Fixed,
 			Members: append([]string{}, proxy.All...),
 		}
 		groups = append(groups, group)

@@ -20,11 +20,11 @@ const agentWorkflow = `Agent 操作流程
   从查询结果复制完整的分组名和节点名，替换示例里的 Manual 和 HK-01。
 
   arkjmp groups --json
-    从 groups[].name 获取手动分组名。
+    从 groups[].name 获取可切换的分组名。
   arkjmp group 'Manual' --json
     从 nodes[].name 获取节点名。
   arkjmp switch 'Manual' 'HK-01' --dry-run --json
-    核对返回的 group 和 node。would_change 为 false 时已选中目标。
+    核对返回的 group 和 node。would_change 为 false 时已手动选中目标。
   arkjmp switch 'Manual' 'HK-01' --json
     确认预览目标后提交切换。
   arkjmp current --group 'Manual' --json
@@ -59,7 +59,7 @@ positional arguments:
     tui (ui)            交互式界面（默认）
     status              控制器版本/模式/分组概况
     list                打印所有分组和节点（兼容旧版 --list）
-    groups              列出手动分组（Selector）
+    groups              列出可切换的分组（Selector、Fallback）
     group               查看单个分组的节点（只有一个分组时可省略）
     nodes               列出节点（默认合并所有分组）
     current             查看当前选中节点
@@ -123,7 +123,7 @@ func commandHelp(prog, command string) string {
 		},
 		"switch": {
 			usage: "[options] [分组] [节点]",
-			desc:  "切换节点（别名 select / use）",
+			desc:  "切换节点，或为 Fallback 固定节点（别名 select / use）",
 			args: [][2]string{
 				{"分组", "分组名（只有一个分组时可省略，此时第一个位置参数就是节点名）"},
 				{"节点", "节点名（支持唯一前缀）"},
